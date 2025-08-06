@@ -88,7 +88,7 @@ def ask_openai(question: str, context_chunks: List[str]) -> str:
         response = openai.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "Answer only using the given context. Reply in one sentence."},
+                {"role": "assistant", "content": "Answer only using the given context. Reply in one sentence."},
                 {"role": "user", "content": f"Context:\n{context_text}\n\nQuestion:\n{question}"}
             ],
             temperature=0.3,
