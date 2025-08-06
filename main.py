@@ -22,7 +22,7 @@ load_dotenv()
 # Load API Keys securely from environment variables
 openai.api_key = os.getenv("OPENAI_API_KEY")
 API_KEY = os.getenv("API_KEY")
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_API_KEY = "pcsk_7B3Z93_8WBKxheRs5H22N8LeMJTCWzjPR1wUZKE8oUJzHDyhMot6qbZ1JrfSkKM7kcLVu7"
 
 # Initialize app and API router
 app = FastAPI(title="HackRX LLM API", version="1.0.0")
