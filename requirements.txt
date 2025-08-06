@@ -11,3 +11,6 @@ pydantic
 langchain
 pytesseract
 openai
+pdf2image
+python-dotenv
+Pillow
