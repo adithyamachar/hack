@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: hackrx-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host=0.0.0.0 --port=$PORT
+    envVars:
+      - key: PINECONE_API_KEY
+        value: your_pinecone_key
+      - key: COHERE_API_KEY
+        value: your_cohere_key
+      - key: API_KEY
+        value: apocalypse
