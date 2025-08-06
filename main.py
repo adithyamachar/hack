@@ -1,8 +1,7 @@
 import fitz
-import numpy as np
-import cohere
+import openai
 import requests
-from pinecone import Pinecone, ServerlessSpec  # v3 import
+from pinecone import Pinecone, ServerlessSpec
 from fastapi import FastAPI, HTTPException, Depends, status, APIRouter
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -11,14 +10,26 @@ import io
 import os
 from datetime import datetime
 import uuid
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from PIL import Image
+import pytesseract
+from pdf2image import convert_from_bytes
+from dotenv import load_dotenv
 
-# Initialize app and API router with prefix
+# Load environment variables from .env file
+load_dotenv()
+
+# Load API Keys securely from environment variables
+openai.api_key = os.getenv("OPENAI_API_KEY")
+API_KEY = os.getenv("API_KEY")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+
+# Initialize app and API router
 app = FastAPI(title="HackRX LLM API", version="1.0.0")
 router = APIRouter(prefix="/api/v1")
 
 # Security
 security = HTTPBearer()
-PINECONE_API_KEY = "pcsk_7B3Z93_8WBKxheRs5H22N8LeMJTCWzjPR1wUZKE8oUJzHDyhMot6qbZ1JrfSkKM7kcLVu7"
 INDEX_NAME = "pdf"
 
 # Request/Response Models
@@ -28,8 +39,6 @@ class HackRXRequest(BaseModel):
 
 class HackRXResponse(BaseModel):
     answers: List[str]
-
-API_KEY = "bfb8fabaf1ce137c1402366fb3d5a052836234c1ff376c326842f52e3164cc33"
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
@@ -45,108 +54,98 @@ def extract_text_from_pdf_url(pdf_url: str) -> str:
     response = requests.get(pdf_url, timeout=30)
     response.raise_for_status()
     pdf_content = io.BytesIO(response.content)
-    doc = fitz.open(stream=pdf_content, filetype="pdf")
-    text = " ".join(page.get_text().replace("\n", " ") for page in doc)
-    doc.close()
+    try:
+        doc = fitz.open(stream=pdf_content, filetype="pdf")
+        text = " ".join(page.get_text().replace("\n", " ") for page in doc)
+        doc.close()
+        if len(text.strip()) > 50:
+            return text
+    except Exception:
+        pass
+    print("Falling back to OCR for image-based PDF")
+    images = convert_from_bytes(pdf_content.getvalue())
+    text = " ".join(pytesseract.image_to_string(img) for img in images)
     return text
 
-# Initialize Cohere Client
-co = cohere.Client("ba9VI3VW1sXTxyIKhOZHWPA3326tAQzHGVVQ16aI")
+def chunk_text(text: str) -> List[str]:
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=150,
+        separators=["\n\n", "\n", ".", " ", ""]
+    )
+    return splitter.split_text(text)
 
-def chunk_text(text, chunk_size=500):
-    words = text.split()
-    return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+def get_openai_embeddings(texts: List[str]) -> List[List[float]]:
+    response = openai.embeddings.create(
+        input=texts,
+        model="text-embedding-3-small"
+    )
+    return [e.embedding for e in response.data]
 
-# Initialize Pinecone (v3 style)
+def ask_openai(question: str, context_chunks: List[str]) -> str:
+    context_text = "\n\n".join(context_chunks[:3])
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "Answer only using the given context. Reply in one sentence."},
+                {"role": "user", "content": f"Context:\n{context_text}\n\nQuestion:\n{question}"}
+            ],
+            temperature=0.3,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Error: {str(e)}"
+
 def init_pinecone(index_name, api_key):
     pc = Pinecone(api_key=api_key)
     if index_name not in pc.list_indexes().names():
-        print(f"Creating index: {index_name}")
         pc.create_index(
             name=index_name,
-            dimension=1024,
+            dimension=1536,
             metric="cosine",
             spec=ServerlessSpec(cloud='aws', region='us-east-1')
         )
-        print(f"Index {index_name} created successfully")
     return pc.Index(index_name)
 
 try:
     index = init_pinecone(INDEX_NAME, PINECONE_API_KEY)
-    print(f"Connected to Pinecone index: {INDEX_NAME}")
 except Exception as e:
     print(f"Pinecone connection error: {e}")
     index = None
 
-def ask_perplexity(query, context_chunks):
-    api_key = "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"
-    url = "https://api.perplexity.ai/chat/completions"
-    short_chunks = [" ".join(chunk.split()[:100]) for chunk in context_chunks]
-    context_text = "\n\n".join(short_chunks)
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "sonar",
-        "messages": [
-            {"role": "system", "content": "Strictly answer the user's question in only one sentence. Do not provide explanations or extra information and dont cite your answers"},
-            {"role": "user", "content": f"Context:\n{context_text}\n\nQuestion: {query}"}
-        ]
-    }
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code == 200:
-        return response.json()["choices"][0]["message"]["content"]
-    else:
-        print("Error:", response.status_code, response.text)
-        return None
-
 def process_questions_with_model(document_text: str, questions: List[str]) -> List[str]:
-    try:
-        if index is None:
-            return [f"Pinecone index not available"] * len(questions)
-        request_id = uuid.uuid4().hex[:8]
-        chunks = chunk_text(document_text)
-        response = co.embed(
-            texts=chunks,
-            model="embed-english-v3.0",
-            input_type="search_document"
-        )
-        embeddings = response.embeddings
-        pinecone_vectors = [
-            (f"{request_id}-{i}", vec, {"text": chunks[i]}) 
-            for i, vec in enumerate(embeddings)
-        ]
-        index.upsert(vectors=pinecone_vectors, namespace=request_id)
-        answers = []
-        for question in questions:
-            try:
-                query_response = co.embed(
-                    texts=[question],
-                    model="embed-english-v3.0",
-                    input_type="search_query"
-                )
-                query_vec = query_response.embeddings[0]
-                results = index.query(
-                    vector=query_vec, 
-                    top_k=1, 
-                    include_metadata=True,
-                    namespace=request_id
-                )
-                context_chunks = [match['metadata']['text'] for match in results['matches']]
-                answer = ask_perplexity(question, context_chunks)
-                answers.append(answer if answer else "Unable to generate answer")
-            except Exception as e:
-                answers.append(f"Error processing question: {str(e)}")
+    if index is None:
+        return ["Pinecone index not available"] * len(questions)
+    request_id = uuid.uuid4().hex[:8]
+    chunks = chunk_text(document_text)
+    embeddings = get_openai_embeddings(chunks)
+    pinecone_vectors = [
+        (f"{request_id}-{i}", vec, {"text": chunks[i]})
+        for i, vec in enumerate(embeddings)
+    ]
+    index.upsert(vectors=pinecone_vectors, namespace=request_id)
+    answers = []
+    for question in questions:
         try:
-            index.delete(delete_all=True, namespace=request_id)
-        except:
-            pass
-        return answers
-    except Exception as e:
-        return [f"Error processing document: {str(e)}"] * len(questions)
+            query_embedding = get_openai_embeddings([question])[0]
+            results = index.query(
+                vector=query_embedding,
+                top_k=5,
+                include_metadata=True,
+                namespace=request_id
+            )
+            context_chunks = [match['metadata']['text'] for match in results['matches']]
+            answer = ask_openai(question, context_chunks)
+            answers.append(answer if answer else "Unable to generate answer")
+        except Exception as e:
+            answers.append(f"Error processing question: {str(e)}")
+    try:
+        index.delete(delete_all=True, namespace=request_id)
+    except:
+        pass
+    return answers
 
-# Route definitions under router
 @router.post("/hackrx/run", response_model=HackRXResponse)
 async def process_hackrx_request(request: HackRXRequest, token: str = Depends(verify_token)):
     try:
@@ -164,10 +163,8 @@ async def health_check():
 async def root():
     return {"message": "HackRX LLM API is running"}
 
-# Include router
 app.include_router(router)
 
-# Uvicorn runner for local development
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
