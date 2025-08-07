@@ -1,5 +1,4 @@
 import fitz
-import openai
 import requests
 from pinecone import Pinecone, ServerlessSpec
 from fastapi import FastAPI, HTTPException, Depends, status, APIRouter
@@ -15,14 +14,18 @@ from PIL import Image
 import pytesseract
 from pdf2image import convert_from_bytes
 from dotenv import load_dotenv
+from openai import OpenAI
 
 # Load environment variables
 load_dotenv()
 
 # API Keys
-openai.api_key = os.getenv("OPENAI_API_KEY")
 API_KEY = os.getenv("API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+
+# Instantiate OpenAI client
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Constants
 INDEX_NAME = "pdf"
@@ -77,7 +80,7 @@ def chunk_text(text: str) -> List[str]:
 
 # === Embeddings ===
 def get_openai_embeddings(texts: List[str]) -> List[List[float]]:
-    response = openai.embeddings.create(
+    response = client.embeddings.create(
         input=texts,
         model="text-embedding-3-small"
     )
@@ -87,10 +90,10 @@ def get_openai_embeddings(texts: List[str]) -> List[List[float]]:
 def ask_openai(question: str, context_chunks: List[str]) -> str:
     context_text = "\n\n".join(context_chunks[:3])
     try:
-        response = openai.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "assistant", "content": "Answer only using the given context. Reply in one sentence."},
+                {"role": "system", "content": "Answer only using the given context. Reply in one sentence."},
                 {"role": "user", "content": f"Context:\n{context_text}\n\nQuestion:\n{question}"}
             ],
             temperature=0.3,
