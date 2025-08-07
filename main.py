@@ -16,23 +16,21 @@ import pytesseract
 from pdf2image import convert_from_bytes
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 
-# Load API Keys securely from environment variables
+# API Keys
 openai.api_key = os.getenv("OPENAI_API_KEY")
 API_KEY = os.getenv("API_KEY")
-PINECONE_API_KEY = "pcsk_7B3Z93_8WBKxheRs5H22N8LeMJTCWzjPR1wUZKE8oUJzHDyhMot6qbZ1JrfSkKM7kcLVu7"
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
-# Initialize app and API router
+# Constants
+INDEX_NAME = "pdf"
+security = HTTPBearer()
 app = FastAPI(title="HackRX LLM API", version="1.0.0")
 router = APIRouter(prefix="/api/v1")
 
-# Security
-security = HTTPBearer()
-INDEX_NAME = "pdf"
-
-# Request/Response Models
+# === Models ===
 class HackRXRequest(BaseModel):
     documents: str  # URL to PDF
     questions: List[str]
@@ -40,6 +38,7 @@ class HackRXRequest(BaseModel):
 class HackRXResponse(BaseModel):
     answers: List[str]
 
+# === Auth ===
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
     if token != API_KEY:
@@ -50,6 +49,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         )
     return token
 
+# === PDF Parsing ===
 def extract_text_from_pdf_url(pdf_url: str) -> str:
     response = requests.get(pdf_url, timeout=30)
     response.raise_for_status()
@@ -64,9 +64,9 @@ def extract_text_from_pdf_url(pdf_url: str) -> str:
         pass
     print("Falling back to OCR for image-based PDF")
     images = convert_from_bytes(pdf_content.getvalue())
-    text = " ".join(pytesseract.image_to_string(img) for img in images)
-    return text
+    return " ".join(pytesseract.image_to_string(img) for img in images)
 
+# === Text Splitting ===
 def chunk_text(text: str) -> List[str]:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
@@ -75,6 +75,7 @@ def chunk_text(text: str) -> List[str]:
     )
     return splitter.split_text(text)
 
+# === Embeddings ===
 def get_openai_embeddings(texts: List[str]) -> List[List[float]]:
     response = openai.embeddings.create(
         input=texts,
@@ -82,6 +83,7 @@ def get_openai_embeddings(texts: List[str]) -> List[List[float]]:
     )
     return [e.embedding for e in response.data]
 
+# === LLM Response ===
 def ask_openai(question: str, context_chunks: List[str]) -> str:
     context_text = "\n\n".join(context_chunks[:3])
     try:
@@ -97,6 +99,7 @@ def ask_openai(question: str, context_chunks: List[str]) -> str:
     except Exception as e:
         return f"Error: {str(e)}"
 
+# === Pinecone Setup ===
 def init_pinecone(index_name, api_key):
     pc = Pinecone(api_key=api_key)
     if index_name not in pc.list_indexes().names():
@@ -114,6 +117,7 @@ except Exception as e:
     print(f"Pinecone connection error: {e}")
     index = None
 
+# === Processing ===
 def process_questions_with_model(document_text: str, questions: List[str]) -> List[str]:
     if index is None:
         return ["Pinecone index not available"] * len(questions)
@@ -146,6 +150,7 @@ def process_questions_with_model(document_text: str, questions: List[str]) -> Li
         pass
     return answers
 
+# === API Routes ===
 @router.post("/hackrx/run", response_model=HackRXResponse)
 async def process_hackrx_request(request: HackRXRequest, token: str = Depends(verify_token)):
     try:
@@ -163,8 +168,10 @@ async def health_check():
 async def root():
     return {"message": "HackRX LLM API is running"}
 
+# === Include router ===
 app.include_router(router)
 
+# === Entry Point ===
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
