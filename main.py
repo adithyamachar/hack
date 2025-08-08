@@ -82,26 +82,31 @@ def chunk_text(text: str) -> List[str]:
     return splitter.split_text(text)
 
 # === Embeddings ===
+def preprocess(text):
+    return text.replace("\n", " ").strip().lower()
+
 def get_cohere_embeddings(texts: List[str]) -> List[List[float]]:
+    preprocessed_texts = [preprocess(t) for t in texts]
     response = co.embed(
-        texts=texts,
+        texts=preprocessed_texts,
         model="embed-english-v3.0",
         input_type="search_document"
     )
     return response.embeddings
 
+
 # === LLM Response using OpenAI ===
 def ask_openai(question: str, context_chunks: List[str]) -> str:
-    context = "\n\n".join(context_chunks[:3])
+    context = "\n\n".join(context_chunks)
     try:
         messages = [
             {"role": "system", "content": "You are a helpful assistant who answers my questions precisely in one sentence."},
-            {"role": "user", "content": f"Context:\n{context}\n\nQuestion:\n{question}"}
+            {"role": "user", "content": f"The user asked a question based on a document. Use only the context below to answer.\n\nContext:\n{context}\n\nQuestion:\n{question}"}
         ]
         response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o",
             messages=messages,
-            temperature=0.4
+            temperature=0.2
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
