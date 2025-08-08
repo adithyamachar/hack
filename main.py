@@ -15,7 +15,7 @@ import pytesseract
 from pdf2image import convert_from_bytes
 from dotenv import load_dotenv
 import cohere
-import openai
+from openai import OpenAI
 
 # Load environment variables
 load_dotenv()
@@ -25,10 +25,10 @@ API_KEY = "bfb8fabaf1ce137c1402366fb3d5a052836234c1ff376c326842f52e3164cc33"
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai.api_key = OPENAI_API_KEY
 
-# Instantiate Cohere client
+# Clients
 co = cohere.Client(COHERE_API_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Constants
 INDEX_NAME = "pdf"
@@ -94,21 +94,16 @@ def get_cohere_embeddings(texts: List[str]) -> List[List[float]]:
 def ask_openai(question: str, context_chunks: List[str]) -> str:
     context = "\n\n".join(context_chunks[:3])
     try:
-        prompt = f"""
-Answer the question based on the context below:
-
-Context:
-{context}
-
-Question:
-{question}
-        """
-        response = openai.ChatCompletion.create(
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": f"Context:\n{context}\n\nQuestion:\n{question}"}
+        ]
+        response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             temperature=0.4
         )
-        return response.choices[0].message["content"].strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -118,7 +113,7 @@ def init_pinecone(index_name, api_key):
     if index_name not in pc.list_indexes().names():
         pc.create_index(
             name=index_name,
-            dimension=1536,
+            dimension=1024,  # updated to match Cohere v3.0 dimensions
             metric="cosine",
             spec=ServerlessSpec(cloud='aws', region='us-east-1')
         )
