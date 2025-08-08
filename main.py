@@ -14,18 +14,18 @@ from PIL import Image
 import pytesseract
 from pdf2image import convert_from_bytes
 from dotenv import load_dotenv
-from openai import OpenAI
+import cohere
 
 # Load environment variables
 load_dotenv()
 
 # API Keys
 API_KEY = "bfb8fabaf1ce137c1402366fb3d5a052836234c1ff376c326842f52e3164cc33"
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
-# Instantiate OpenAI client
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Instantiate Cohere client
+co = cohere.Client(COHERE_API_KEY)
 
 # Constants
 INDEX_NAME = "pdf"
@@ -79,26 +79,24 @@ def chunk_text(text: str) -> List[str]:
     return splitter.split_text(text)
 
 # === Embeddings ===
-def get_openai_embeddings(texts: List[str]) -> List[List[float]]:
-    response = client.embeddings.create(
-        input=texts,
-        model="text-embedding-3-small"
+def get_cohere_embeddings(texts: List[str]) -> List[List[float]]:
+    response = co.embed(
+        texts=texts,
+        model="embed-english-v3.0",
+        input_type="search_document"
     )
-    return [e.embedding for e in response.data]
+    return response.embeddings
 
 # === LLM Response ===
-def ask_openai(question: str, context_chunks: List[str]) -> str:
+def ask_cohere(question: str, context_chunks: List[str]) -> str:
     context_text = "\n\n".join(context_chunks[:3])
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "Answer only using the given context. Reply in one sentence."},
-                {"role": "user", "content": f"Context:\n{context_text}\n\nQuestion:\n{question}"}
-            ],
+        response = co.chat(
+            message=question,
+            documents=[{"text": chunk} for chunk in context_chunks],
             temperature=0.3,
         )
-        return response.choices[0].message.content.strip()
+        return response.text.strip()
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -126,7 +124,7 @@ def process_questions_with_model(document_text: str, questions: List[str]) -> Li
         return ["Pinecone index not available"] * len(questions)
     request_id = uuid.uuid4().hex[:8]
     chunks = chunk_text(document_text)
-    embeddings = get_openai_embeddings(chunks)
+    embeddings = get_cohere_embeddings(chunks)
     pinecone_vectors = [
         (f"{request_id}-{i}", vec, {"text": chunks[i]})
         for i, vec in enumerate(embeddings)
@@ -135,7 +133,7 @@ def process_questions_with_model(document_text: str, questions: List[str]) -> Li
     answers = []
     for question in questions:
         try:
-            query_embedding = get_openai_embeddings([question])[0]
+            query_embedding = get_cohere_embeddings([question])[0]
             results = index.query(
                 vector=query_embedding,
                 top_k=5,
@@ -143,7 +141,7 @@ def process_questions_with_model(document_text: str, questions: List[str]) -> Li
                 namespace=request_id
             )
             context_chunks = [match['metadata']['text'] for match in results['matches']]
-            answer = ask_openai(question, context_chunks)
+            answer = ask_cohere(question, context_chunks)
             answers.append(answer if answer else "Unable to generate answer")
         except Exception as e:
             answers.append(f"Error processing question: {str(e)}")
