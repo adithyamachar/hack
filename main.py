@@ -95,7 +95,7 @@ def ask_openai(question: str, context_chunks: List[str]) -> str:
     context = "\n\n".join(context_chunks[:3])
     try:
         messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "system", "content": "You are a helpful assistant who answers my questions precisely in one sentence."},
             {"role": "user", "content": f"Context:\n{context}\n\nQuestion:\n{question}"}
         ]
         response = openai_client.chat.completions.create(
