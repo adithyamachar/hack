@@ -15,6 +15,7 @@ import pytesseract
 from pdf2image import convert_from_bytes
 from dotenv import load_dotenv
 import cohere
+import openai
 
 # Load environment variables
 load_dotenv()
@@ -23,6 +24,8 @@ load_dotenv()
 API_KEY = "bfb8fabaf1ce137c1402366fb3d5a052836234c1ff376c326842f52e3164cc33"
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai.api_key = OPENAI_API_KEY
 
 # Instantiate Cohere client
 co = cohere.Client(COHERE_API_KEY)
@@ -87,16 +90,25 @@ def get_cohere_embeddings(texts: List[str]) -> List[List[float]]:
     )
     return response.embeddings
 
-# === LLM Response ===
-def ask_cohere(question: str, context_chunks: List[str]) -> str:
-    context_text = "\n\n".join(context_chunks[:3])
+# === LLM Response using OpenAI ===
+def ask_openai(question: str, context_chunks: List[str]) -> str:
+    context = "\n\n".join(context_chunks[:3])
     try:
-        response = co.chat(
-            message=question,
-            documents=[{"text": chunk} for chunk in context_chunks],
-            temperature=0.3,
+        prompt = f"""
+Answer the question based on the context below:
+
+Context:
+{context}
+
+Question:
+{question}
+        """
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4
         )
-        return response.text.strip()
+        return response.choices[0].message["content"].strip()
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -141,7 +153,7 @@ def process_questions_with_model(document_text: str, questions: List[str]) -> Li
                 namespace=request_id
             )
             context_chunks = [match['metadata']['text'] for match in results['matches']]
-            answer = ask_cohere(question, context_chunks)
+            answer = ask_openai(question, context_chunks)
             answers.append(answer if answer else "Unable to generate answer")
         except Exception as e:
             answers.append(f"Error processing question: {str(e)}")
