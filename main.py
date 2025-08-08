@@ -20,7 +20,7 @@ from openai import OpenAI
 load_dotenv()
 
 # API Keys
-API_KEY = os.getenv("API_KEY")
+API_KEY = "bfb8fabaf1ce137c1402366fb3d5a052836234c1ff376c326842f52e3164cc33"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
