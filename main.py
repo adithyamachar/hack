@@ -85,14 +85,30 @@ def chunk_text(text: str) -> List[str]:
 def preprocess(text):
     return text.replace("\n", " ").strip().lower()
 
-def get_cohere_embeddings(texts: List[str]) -> List[List[float]]:
-    preprocessed_texts = [preprocess(t) for t in texts]
-    response = co.embed(
-        texts=preprocessed_texts,
-        model="embed-english-v3.0",
-        input_type="search_document"
-    )
-    return response.embeddings
+def get_cohere_embeddings(
+    texts: List[str], 
+    model: str = "embed-english-v3.0", 
+    input_type: str = "search_document",
+    batch_size: int = 96
+) -> List[List[float]]:
+    
+    # Preprocess and filter empty strings
+    preprocessed_texts = [preprocess(t) for t in texts if t.strip()]
+    if not preprocessed_texts:
+        return []
+    
+    embeddings = []
+    for i in range(0, len(preprocessed_texts), batch_size):
+        batch = preprocessed_texts[i:i + batch_size]
+        try:
+            response = co.embed(texts=batch, model=model, input_type=input_type)
+            embeddings.extend(response.embeddings)
+        except Exception as e:
+            print(f"Error embedding batch {i//batch_size + 1}: {e}")
+            continue
+    
+    return embeddings
+
 
 
 # === LLM Response using OpenAI ===
@@ -106,6 +122,7 @@ def ask_openai(question: str, context_chunks: List[str]) -> str:
         response = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
+            temperature=0.2
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
