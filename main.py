@@ -116,13 +116,13 @@ def ask_openai(question: str, context_chunks: List[str]) -> str:
     context = "\n\n".join(context_chunks)
     try:
         messages = [
-            {"role": "system", "content": "You are a helpful assistant who answers my questions precisely in one sentence."},
+            {"role": "system", "content": "You are a helpful assistant who answers my questions precisely in one sentence.make sure to give factual answers"},
             {"role": "user", "content": f"The user asked a question based on a document. Use only the context below to answer.\n\nContext:\n{context}\n\nQuestion:\n{question}"}
         ]
         response = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
-            temperature=0.2
+            temperature=0.1
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
@@ -164,7 +164,7 @@ def process_questions_with_model(document_text: str, questions: List[str]) -> Li
             query_embedding = get_cohere_embeddings([question])[0]
             results = index.query(
                 vector=query_embedding,
-                top_k=100,
+                top_k=25,
                 include_metadata=True,
                 namespace=request_id
             )
