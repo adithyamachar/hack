@@ -104,7 +104,7 @@ def ask_openai(question: str, context_chunks: List[str]) -> str:
             {"role": "user", "content": f"The user asked a question based on a document. Use only the context below to answer.\n\nContext:\n{context}\n\nQuestion:\n{question}"}
         ]
         response = openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5",
             messages=messages,
         )
         return response.choices[0].message.content.strip()
@@ -147,7 +147,7 @@ def process_questions_with_model(document_text: str, questions: List[str]) -> Li
             query_embedding = get_cohere_embeddings([question])[0]
             results = index.query(
                 vector=query_embedding,
-                top_k=8,
+                top_k=15,
                 include_metadata=True,
                 namespace=request_id
             )
