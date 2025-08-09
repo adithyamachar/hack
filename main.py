@@ -90,12 +90,10 @@ def semantic_chunk_text(text: str) -> List[str]:
         r'(?=^\d+\.\s+[A-Z])',  # "1. Introduction"
         r'(?=^\d+\.\d+\s+[A-Z])',  # "1.1 Overview"
         r'(?=^[A-Z][A-Z\s]{2,}:)',  # "TERMS AND CONDITIONS:"
-        r'(?=^[A-Z][^.!?]{5,50}\n)',  # Standalone headings
         
         # Legal document patterns
         r'(?i)(?=\bwhereas\b)',  # Contract clauses
         r'(?i)(?=\bnow,?\s+therefore\b)',  # Legal transitions
-        r'(?i)(?=\bin\s+witness\s+whereof\b)',  # Contract endings
         r'(?i)(?=\bfor\s+the\s+avoidance\s+of\s+doubt\b)',  # Clarifications
         
         # Numbered/lettered lists
@@ -105,27 +103,40 @@ def semantic_chunk_text(text: str) -> List[str]:
         
         # Special document sections
         r'(?i)(?=\b(?:definitions?|terms?|scope|purpose|background|summary|conclusion|recommendations?)\b:)',
-        r'(?i)(?=\b(?:exhibit|schedule|attachment|addendum)\s+[A-Z\d])',
     ]
-    
-    # Combine all patterns
-    combined_pattern = '|'.join(structure_patterns)
     
     # Step 3: Split on semantic boundaries
     semantic_sections = []
-    if combined_pattern:
-        sections = re.split(f'({combined_pattern})', text, flags=re.MULTILINE)
-        # Filter out empty sections and combine split markers with following content
+    
+    # Try to split using patterns, but with error handling
+    try:
+        # Combine patterns with proper flags
+        combined_pattern = '|'.join(f'({pattern})' for pattern in structure_patterns)
+        
+        # Use re.split with proper flags
+        sections = re.split(combined_pattern, text, flags=re.MULTILINE | re.IGNORECASE)
+        
+        # Filter and process sections
         current_section = ""
         for section in sections:
-            section = section.strip()
-            if not section:
+            if section is None or not section.strip():
                 continue
+                
+            section = section.strip()
             
-            # If this looks like a header/marker, start new section
-            if re.match(combined_pattern, section, flags=re.MULTILINE | re.IGNORECASE):
-                if current_section:
-                    semantic_sections.append(current_section.strip())
+            # Check if this section looks like a header using individual patterns
+            is_header = False
+            for pattern in structure_patterns:
+                try:
+                    if re.match(pattern, section, re.MULTILINE | re.IGNORECASE):
+                        is_header = True
+                        break
+                except re.error:
+                    # Skip problematic patterns
+                    continue
+            
+            if is_header and current_section:
+                semantic_sections.append(current_section.strip())
                 current_section = section
             else:
                 current_section += " " + section if current_section else section
@@ -133,22 +144,21 @@ def semantic_chunk_text(text: str) -> List[str]:
         # Add final section
         if current_section:
             semantic_sections.append(current_section.strip())
-    else:
+            
+    except re.error as e:
+        print(f"Regex error in semantic chunking: {e}")
+        # Fallback: simple paragraph-based splitting
+        semantic_sections = [p.strip() for p in text.split('\n\n') if p.strip()]
+    
+    # If no sections found, use the whole text
+    if not semantic_sections:
         semantic_sections = [text]
     
     # Step 4: Enhanced text splitter with better parameters
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,  # Optimal size for semantic search
-        chunk_overlap=150,  # Good context preservation
-        separators=[
-            "\n\n",    # Paragraph breaks (highest priority)
-            "\n",      # Line breaks
-            ". ",      # Sentence endings
-            "; ",      # Clause separators
-            ", ",      # Comma separations
-            " ",       # Word boundaries
-            ""         # Character level (last resort)
-        ],
+        chunk_size=800,
+        chunk_overlap=150,
+        separators=["\n\n", "\n", ". ", "; ", ", ", " ", ""],
         length_function=len,
         is_separator_regex=False,
     )
@@ -167,20 +177,29 @@ def semantic_chunk_text(text: str) -> List[str]:
         if len(section) <= 800:
             final_chunks.append(section)
         else:
-            # Split large sections while preserving context
-            section_chunks = splitter.split_text(section)
-            
-            # Add section context to chunks (except first one which already has it)
-            for j, chunk in enumerate(section_chunks):
-                if j == 0:
-                    final_chunks.append(chunk)
+            # Split large sections
+            try:
+                section_chunks = splitter.split_text(section)
+                final_chunks.extend(section_chunks)
+            except Exception as e:
+                print(f"Error splitting section: {e}")
+                # Fallback: add section as-is or truncate
+                if len(section) > 1500:
+                    # Simple sentence-based splitting as fallback
+                    sentences = re.split(r'(?<=[.!?])\s+', section)
+                    current_chunk = ""
+                    for sentence in sentences:
+                        if len(current_chunk + sentence) > 800 and current_chunk:
+                            final_chunks.append(current_chunk.strip())
+                            current_chunk = sentence
+                        else:
+                            current_chunk += " " + sentence
+                    if current_chunk:
+                        final_chunks.append(current_chunk.strip())
                 else:
-                    # Add a brief context from section start for continuity
-                    section_start = section[:100] + "..." if len(section) > 100 else section
-                    contextual_chunk = f"[Continued from: {section_start}] {chunk}"
-                    final_chunks.append(contextual_chunk)
+                    final_chunks.append(section)
     
-    # Step 6: Post-processing - merge very small chunks with neighbors
+    # Step 6: Post-processing - merge very small chunks
     processed_chunks = []
     i = 0
     
@@ -192,28 +211,37 @@ def semantic_chunk_text(text: str) -> List[str]:
             next_chunk = final_chunks[i + 1]
             merged = current_chunk + " " + next_chunk
             
-            # Only merge if result isn't too large
             if len(merged) <= 1000:
                 processed_chunks.append(merged)
-                i += 2  # Skip next chunk as it's been merged
+                i += 2
                 continue
         
         processed_chunks.append(current_chunk)
         i += 1
     
-    # Step 7: Final cleanup and validation
+    # Step 7: Final cleanup
     final_processed_chunks = []
     for chunk in processed_chunks:
         chunk = chunk.strip()
         
-        # Remove chunks that are too short or just whitespace/punctuation
+        # Remove chunks that are too short or just whitespace
         if len(chunk) >= 30 and not re.match(r'^[^\w]*$', chunk):
-            # Clean up any residual formatting issues
+            # Clean up formatting
             chunk = re.sub(r'\s+', ' ', chunk)
             final_processed_chunks.append(chunk)
     
-    return final_processed_chunks
-
+    # Ensure we always return at least one chunk
+    if not final_processed_chunks and text.strip():
+        # Fallback: simple chunking by length
+        words = text.split()
+        chunk_size = 100  # words
+        for i in range(0, len(words), chunk_size):
+            chunk_words = words[i:i + chunk_size]
+            chunk_text = ' '.join(chunk_words)
+            if len(chunk_text.strip()) >= 30:
+                final_processed_chunks.append(chunk_text.strip())
+    
+    return final_processed_chunks if final_processed_chunks else [text[:1000]]
 
 # === Embeddings ===
 def preprocess(text):
