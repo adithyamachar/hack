@@ -260,62 +260,30 @@ class PrecisionRetriever:
 # ============================================
 
 def generate_precise_answer(question: str, retrieved_chunks: List[Dict], openai_client) -> str:
-    """Generate precise, fact-focused answers"""
-    
-    # Step 1: Extract the most relevant facts
-    relevant_facts = []
-    for chunk in retrieved_chunks:
-        relevant_facts.extend(chunk.get('facts', []))
-    
-    # Step 2: Create focused context
-    # Prioritize chunks with facts, then by similarity
-    context_parts = []
-    
-    # First, add chunks with relevant facts
-    fact_chunks = [chunk for chunk in retrieved_chunks if chunk.get('facts')]
-    for chunk in fact_chunks[:2]:  # Top 2 fact-containing chunks
-        context_parts.append(chunk['text'])
-    
-    # Then add other relevant chunks if needed
-    remaining_chunks = [chunk for chunk in retrieved_chunks if not chunk.get('facts')]
-    for chunk in remaining_chunks[:2]:  # Top 2 additional chunks
-        context_parts.append(chunk['text'])
-    
-    context = "\n\n".join(context_parts)
-    
-    # Step 3: Create precise prompt
-    prompt = f"""You are answering questions about insurance policy documents. Be precise and concise.
+    """Minimal, token-efficient answer generator"""
 
-IMPORTANT INSTRUCTIONS:
-1. Look for EXPLICIT numeric values (days, months, years, amounts) in the context
-2. If you find a specific number related to the question, state it clearly
-3. Do NOT say "not specified" if there's a clear value mentioned
-4. Give the most direct answer possible
-5. Only include essential details
+    # Get top 2 chunks with facts, then top 1 without
+    fact_chunks = [c['text'] for c in retrieved_chunks if c.get('facts')][:2]
+    other_chunks = [c['text'] for c in retrieved_chunks if not c.get('facts')][:1]
 
-Context:
-{context}
-
-Question: {question}
-
-Answer (be precise and concise):"""
+    # Merge and trim context (~200 tokens)
+    context = "\n\n".join(fact_chunks + other_chunks)[:1000]
 
     try:
         response = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {
-                    "role": "system", 
-                    "content": """You are a precise insurance policy assistant. Extract specific facts and numbers from the context. 
-                    Never say 'not specified' if there's a clear value mentioned. Be concise but accurate."""
+                    "role": "system",
+                    "content": "You answer with exact facts and numbers from the provided text. Be concise."
                 },
                 {
-                    "role": "user", 
-                    "content": prompt
+                    "role": "user",
+                    "content": f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
                 }
             ],
-            temperature=0.1,  # Low temperature for consistency
-            max_tokens=150  # Force conciseness
+            temperature=0,
+            max_tokens=80  # Tighter limit
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
