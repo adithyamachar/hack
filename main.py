@@ -123,7 +123,6 @@ def ask_openai(question: str, context_chunks: List[str]) -> str:
         response = openai_client.chat.completions.create(
             model="gpt-5",
             messages=messages,
-            temperature=0.2
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
