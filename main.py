@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 import cohere
 from openai import OpenAI
 import re
+from typing import List
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 # Load environment variables
 load_dotenv()
 
@@ -74,29 +76,144 @@ def extract_text_from_pdf_url(pdf_url: str) -> str:
 
 # === Text Splitting ===
 def semantic_chunk_text(text: str) -> List[str]:
-    # Normalize spaces
-    text = re.sub(r'\s+', ' ', text)
+    """
+    Enhanced semantic chunking that respects document structure and content boundaries
+    """
+    # Step 1: Clean and normalize text
+    text = re.sub(r'\s+', ' ', text.strip())
     
-    # Step 1: Split on strong semantic boundaries (headings, clause labels, numbered sections)
-    semantic_sections = re.split(
-        r'(?i)(?=\b(section|clause|article)\s+\d+[:.)])', 
-        text
-    )
+    # Step 2: Identify and preserve document structure markers
+    structure_patterns = [
+        # Headers and sections
+        r'(?i)(?=\b(?:section|clause|article|chapter|part|subsection|paragraph|appendix)\s+[IVX\d]+[:.)])',
+        r'(?i)(?=\b(?:section|clause|article|chapter|part|subsection|paragraph|appendix)\s+\d+[:.)])',
+        r'(?=^\d+\.\s+[A-Z])',  # "1. Introduction"
+        r'(?=^\d+\.\d+\s+[A-Z])',  # "1.1 Overview"
+        r'(?=^[A-Z][A-Z\s]{2,}:)',  # "TERMS AND CONDITIONS:"
+        r'(?=^[A-Z][^.!?]{5,50}\n)',  # Standalone headings
+        
+        # Legal document patterns
+        r'(?i)(?=\bwhereas\b)',  # Contract clauses
+        r'(?i)(?=\bnow,?\s+therefore\b)',  # Legal transitions
+        r'(?i)(?=\bin\s+witness\s+whereof\b)',  # Contract endings
+        r'(?i)(?=\bfor\s+the\s+avoidance\s+of\s+doubt\b)',  # Clarifications
+        
+        # Numbered/lettered lists
+        r'(?=^\([a-z]\)\s+[A-Z])',  # "(a) First item"
+        r'(?=^\([IVX]+\)\s+[A-Z])',  # "(i) Roman numerals"
+        r'(?=^[a-z]\)\s+[A-Z])',  # "a) Item"
+        
+        # Special document sections
+        r'(?i)(?=\b(?:definitions?|terms?|scope|purpose|background|summary|conclusion|recommendations?)\b:)',
+        r'(?i)(?=\b(?:exhibit|schedule|attachment|addendum)\s+[A-Z\d])',
+    ]
     
-    # Step 2: Further split sections if too long, but preserve sentence boundaries
+    # Combine all patterns
+    combined_pattern = '|'.join(structure_patterns)
+    
+    # Step 3: Split on semantic boundaries
+    semantic_sections = []
+    if combined_pattern:
+        sections = re.split(f'({combined_pattern})', text, flags=re.MULTILINE)
+        # Filter out empty sections and combine split markers with following content
+        current_section = ""
+        for section in sections:
+            section = section.strip()
+            if not section:
+                continue
+            
+            # If this looks like a header/marker, start new section
+            if re.match(combined_pattern, section, flags=re.MULTILINE | re.IGNORECASE):
+                if current_section:
+                    semantic_sections.append(current_section.strip())
+                current_section = section
+            else:
+                current_section += " " + section if current_section else section
+        
+        # Add final section
+        if current_section:
+            semantic_sections.append(current_section.strip())
+    else:
+        semantic_sections = [text]
+    
+    # Step 4: Enhanced text splitter with better parameters
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=100,
-        separators=["\n\n", "\n", ". ", "; "]
+        chunk_size=800,  # Optimal size for semantic search
+        chunk_overlap=150,  # Good context preservation
+        separators=[
+            "\n\n",    # Paragraph breaks (highest priority)
+            "\n",      # Line breaks
+            ". ",      # Sentence endings
+            "; ",      # Clause separators
+            ", ",      # Comma separations
+            " ",       # Word boundaries
+            ""         # Character level (last resort)
+        ],
+        length_function=len,
+        is_separator_regex=False,
     )
     
+    # Step 5: Process sections and create final chunks
     final_chunks = []
-    for section in semantic_sections:
-        if len(section.strip()) < 50:
-            continue
-        final_chunks.extend(splitter.split_text(section.strip()))
     
-    return final_chunks
+    for i, section in enumerate(semantic_sections):
+        section = section.strip()
+        
+        # Skip very short sections
+        if len(section) < 30:
+            continue
+        
+        # If section is small enough, keep as single chunk
+        if len(section) <= 800:
+            final_chunks.append(section)
+        else:
+            # Split large sections while preserving context
+            section_chunks = splitter.split_text(section)
+            
+            # Add section context to chunks (except first one which already has it)
+            for j, chunk in enumerate(section_chunks):
+                if j == 0:
+                    final_chunks.append(chunk)
+                else:
+                    # Add a brief context from section start for continuity
+                    section_start = section[:100] + "..." if len(section) > 100 else section
+                    contextual_chunk = f"[Continued from: {section_start}] {chunk}"
+                    final_chunks.append(contextual_chunk)
+    
+    # Step 6: Post-processing - merge very small chunks with neighbors
+    processed_chunks = []
+    i = 0
+    
+    while i < len(final_chunks):
+        current_chunk = final_chunks[i]
+        
+        # If chunk is very small, try to merge with next one
+        if len(current_chunk) < 200 and i + 1 < len(final_chunks):
+            next_chunk = final_chunks[i + 1]
+            merged = current_chunk + " " + next_chunk
+            
+            # Only merge if result isn't too large
+            if len(merged) <= 1000:
+                processed_chunks.append(merged)
+                i += 2  # Skip next chunk as it's been merged
+                continue
+        
+        processed_chunks.append(current_chunk)
+        i += 1
+    
+    # Step 7: Final cleanup and validation
+    final_processed_chunks = []
+    for chunk in processed_chunks:
+        chunk = chunk.strip()
+        
+        # Remove chunks that are too short or just whitespace/punctuation
+        if len(chunk) >= 30 and not re.match(r'^[^\w]*$', chunk):
+            # Clean up any residual formatting issues
+            chunk = re.sub(r'\s+', ' ', chunk)
+            final_processed_chunks.append(chunk)
+    
+    return final_processed_chunks
+
 
 # === Embeddings ===
 def preprocess(text):
