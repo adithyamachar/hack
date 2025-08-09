@@ -16,7 +16,7 @@ from pdf2image import convert_from_bytes
 from dotenv import load_dotenv
 import cohere
 from openai import OpenAI
-
+import re
 # Load environment variables
 load_dotenv()
 
