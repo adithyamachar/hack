@@ -147,7 +147,7 @@ def process_questions_with_model(document_text: str, questions: List[str]) -> Li
             query_embedding = get_cohere_embeddings([question])[0]
             results = index.query(
                 vector=query_embedding,
-                top_k=15,
+                top_k=25,
                 include_metadata=True,
                 namespace=request_id
             )
