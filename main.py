@@ -4,7 +4,7 @@ from pinecone import Pinecone, ServerlessSpec
 from fastapi import FastAPI, HTTPException, Depends, status, APIRouter
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import List
+from typing import List, Dict, Tuple
 import io
 import os
 from datetime import datetime
@@ -16,6 +16,8 @@ from pdf2image import convert_from_bytes
 from dotenv import load_dotenv
 import cohere
 from openai import OpenAI
+import re
+import numpy as np
 
 # Load environment variables
 load_dotenv()
@@ -72,61 +74,265 @@ def extract_text_from_pdf_url(pdf_url: str) -> str:
     images = convert_from_bytes(pdf_content.getvalue())
     return " ".join(pytesseract.image_to_string(img) for img in images)
 
-# === Text Splitting ===
-def chunk_text(text: str) -> List[str]:
+# ============================================
+# ENHANCED TEXT PROCESSING FOR PRECISE RETRIEVAL
+# ============================================
+
+def extract_numeric_facts(text: str) -> List[Dict]:
+    """Extract explicit numeric facts from text"""
+    patterns = [
+        # Time periods
+        (r'(\d+)\s*days?(?:\s+(?:grace\s+)?period)?', 'days'),
+        (r'(\d+)\s*months?(?:\s+(?:waiting\s+)?period)?', 'months'),  
+        (r'(\d+)\s*years?(?:\s+(?:waiting\s+)?period)?', 'years'),
+        
+        # Age ranges
+        (r'(?:age\s+)?(\d+)(?:\s*[-–]\s*(\d+))?\s*years?', 'age_range'),
+        
+        # Coverage amounts
+        (r'(?:up\s+to\s+)?(?:Rs\.?\s*|INR\s*)?(\d+(?:,\d+)*)', 'amount'),
+        
+        # Percentages  
+        (r'(\d+)%', 'percentage'),
+    ]
+    
+    facts = []
+    for pattern, fact_type in patterns:
+        matches = re.finditer(pattern, text, re.IGNORECASE)
+        for match in matches:
+            # Get surrounding context (50 chars before/after)
+            start = max(0, match.start() - 50)
+            end = min(len(text), match.end() + 50)
+            context = text[start:end].strip()
+            
+            facts.append({
+                'value': match.group(),
+                'type': fact_type,
+                'context': context,
+                'position': match.start()
+            })
+    
+    return facts
+
+def extract_keywords(text: str) -> List[str]:
+    """Extract key terms from text"""
+    keywords = []
+    
+    key_patterns = [
+        r'\bgrace\s+period\b',
+        r'\bwaiting\s+period\b', 
+        r'\bmaternity\b',
+        r'\bcataract\b',
+        r'\bAYUSH\b',
+        r'\bcoverage\b',
+        r'\bexclusion\b',
+        r'\bdeductible\b',
+        r'\bco-?pay\b',
+        r'\bsum\s+insured\b',
+        r'\bpre-?existing\b'
+    ]
+    
+    for pattern in key_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            keywords.append(pattern.strip('\\b'))
+    
+    return keywords
+
+def enhanced_semantic_chunking(text: str) -> List[Dict]:
+    """Enhanced chunking that preserves context and extracts key facts"""
+    
+    # Step 1: Extract numeric facts first
+    numeric_facts = extract_numeric_facts(text)
+    
+    # Step 2: Create fact-aware chunks
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=150,
-        separators=["\n\n", "\n", ".", " ", ""]
+        chunk_size=600,  # Smaller for precision
+        chunk_overlap=100,
+        separators=["\n\n", "\n", ". ", "; ", ", ", " "]
     )
-    return splitter.split_text(text)
+    
+    base_chunks = splitter.split_text(text)
+    
+    # Step 3: Enhance chunks with extracted facts
+    enhanced_chunks = []
+    for i, chunk in enumerate(base_chunks):
+        # Find facts in this chunk
+        chunk_facts = []
+        for fact in numeric_facts:
+            if fact['context'] in chunk or chunk in fact['context']:
+                chunk_facts.append(fact)
+        
+        enhanced_chunks.append({
+            'text': chunk,
+            'chunk_id': i,
+            'facts': chunk_facts,
+            'has_numbers': bool(re.search(r'\d+', chunk)),
+            'keywords': extract_keywords(chunk)
+        })
+    
+    return enhanced_chunks
+
+# ============================================
+# IMPROVED RETRIEVAL SYSTEM
+# ============================================
+
+class PrecisionRetriever:
+    """Retrieval system optimized for finding specific facts"""
+    
+    def __init__(self, cohere_client):
+        self.co = cohere_client
+        self.chunks = []
+        
+    def add_chunks(self, chunks: List[Dict]):
+        """Add enhanced chunks to retriever"""
+        self.chunks = chunks
+        
+        # Create embeddings
+        chunk_texts = [chunk['text'] for chunk in chunks]
+        response = self.co.embed(
+            texts=chunk_texts,
+            model="embed-english-v3.0",
+            input_type="search_document"
+        )
+        
+        for i, embedding in enumerate(response.embeddings):
+            self.chunks[i]['embedding'] = embedding
+    
+    def retrieve_for_question(self, question: str, top_k: int = 5) -> List[Dict]:
+        """Enhanced retrieval that prioritizes fact-containing chunks"""
+        
+        # Get question embedding
+        question_response = self.co.embed(
+            texts=[question],
+            model="embed-english-v3.0",
+            input_type="search_query"
+        )
+        question_embedding = question_response.embeddings[0]
+        
+        # Calculate similarities
+        similarities = []
+        for chunk in self.chunks:
+            # Base semantic similarity
+            sim = self._cosine_similarity(question_embedding, chunk['embedding'])
+            
+            # Boost chunks with numbers if question asks for specific values
+            if self._question_asks_for_number(question) and chunk['has_numbers']:
+                sim *= 1.3
+            
+            # Boost chunks with relevant keywords
+            question_lower = question.lower()
+            for keyword in chunk['keywords']:
+                if keyword.replace('\\b', '').replace('-?', '') in question_lower:
+                    sim *= 1.2
+            
+            # Boost chunks with extracted facts
+            if chunk['facts']:
+                sim *= 1.1
+            
+            similarities.append((sim, chunk))
+        
+        # Sort by similarity and return top_k
+        similarities.sort(key=lambda x: x[0], reverse=True)
+        return [chunk for _, chunk in similarities[:top_k]]
+    
+    def _cosine_similarity(self, a, b):
+        """Calculate cosine similarity"""
+        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    
+    def _question_asks_for_number(self, question: str) -> bool:
+        """Check if question is asking for a specific numeric value"""
+        numeric_question_patterns = [
+            r'\bhow\s+many\b',
+            r'\bhow\s+much\b', 
+            r'\bhow\s+long\b',
+            r'\bwhat\s+is\s+the\s+(?:period|duration|time|amount|limit)\b',
+            r'\bdays?\b',
+            r'\bmonths?\b',
+            r'\byears?\b',
+            r'\bamount\b',
+            r'\blimit\b'
+        ]
+        
+        return any(re.search(pattern, question, re.IGNORECASE) for pattern in numeric_question_patterns)
+
+# ============================================
+# ENHANCED ANSWER GENERATION
+# ============================================
+
+def generate_precise_answer(question: str, retrieved_chunks: List[Dict], openai_client) -> str:
+    """Generate precise, fact-focused answers"""
+    
+    # Step 1: Extract the most relevant facts
+    relevant_facts = []
+    for chunk in retrieved_chunks:
+        relevant_facts.extend(chunk.get('facts', []))
+    
+    # Step 2: Create focused context
+    # Prioritize chunks with facts, then by similarity
+    context_parts = []
+    
+    # First, add chunks with relevant facts
+    fact_chunks = [chunk for chunk in retrieved_chunks if chunk.get('facts')]
+    for chunk in fact_chunks[:2]:  # Top 2 fact-containing chunks
+        context_parts.append(chunk['text'])
+    
+    # Then add other relevant chunks if needed
+    remaining_chunks = [chunk for chunk in retrieved_chunks if not chunk.get('facts')]
+    for chunk in remaining_chunks[:2]:  # Top 2 additional chunks
+        context_parts.append(chunk['text'])
+    
+    context = "\n\n".join(context_parts)
+    
+    # Step 3: Create precise prompt
+    prompt = f"""You are answering questions about insurance policy documents. Be precise and concise.
+
+IMPORTANT INSTRUCTIONS:
+1. Look for EXPLICIT numeric values (days, months, years, amounts) in the context
+2. If you find a specific number related to the question, state it clearly
+3. Do NOT say "not specified" if there's a clear value mentioned
+4. Give the most direct answer possible
+5. Only include essential details
+
+Context:
+{context}
+
+Question: {question}
+
+Answer (be precise and concise):"""
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": """You are a precise insurance policy assistant. Extract specific facts and numbers from the context. 
+                    Never say 'not specified' if there's a clear value mentioned. Be concise but accurate."""
+                },
+                {
+                    "role": "user", 
+                    "content": prompt
+                }
+            ],
+            temperature=0.1,  # Low temperature for consistency
+            max_tokens=150  # Force conciseness
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 # === Embeddings ===
 def preprocess(text):
     return text.replace("\n", " ").strip().lower()
 
-def get_cohere_embeddings(
-    texts: List[str], 
-    model: str = "embed-english-v3.0", 
-    input_type: str = "search_document",
-    batch_size: int = 96
-) -> List[List[float]]:
-    
-    # Preprocess and filter empty strings
-    preprocessed_texts = [preprocess(t) for t in texts if t.strip()]
-    if not preprocessed_texts:
-        return []
-    
-    embeddings = []
-    for i in range(0, len(preprocessed_texts), batch_size):
-        batch = preprocessed_texts[i:i + batch_size]
-        try:
-            response = co.embed(texts=batch, model=model, input_type=input_type)
-            embeddings.extend(response.embeddings)
-        except Exception as e:
-            print(f"Error embedding batch {i//batch_size + 1}: {e}")
-            continue
-    
-    return embeddings
-
-
-
-# === LLM Response using OpenAI ===
-def ask_openai(question: str, context_chunks: List[str]) -> str:
-    context = "\n\n".join(context_chunks)
-    try:
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant who answers my questions precisely in one sentence.make sure to give factual answers"},
-            {"role": "user", "content": f"The user asked a question based on a document. Use only the context below to answer.\n\nContext:\n{context}\n\nQuestion:\n{question}"}
-        ]
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            temperature=0.1
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Error: {str(e)}"
+def get_cohere_embeddings(texts: List[str]) -> List[List[float]]:
+    preprocessed_texts = [preprocess(t) for t in texts]
+    response = co.embed(
+        texts=preprocessed_texts,
+        model="embed-english-v3.0",
+        input_type="search_document"
+    )
+    return response.embeddings
 
 # === Pinecone Setup ===
 def init_pinecone(index_name, api_key):
@@ -146,37 +352,55 @@ except Exception as e:
     print(f"Pinecone connection error: {e}")
     index = None
 
-# === Processing ===
+# ============================================
+# ENHANCED MAIN PROCESSING FUNCTION
+# ============================================
+
 def process_questions_with_model(document_text: str, questions: List[str]) -> List[str]:
+    """Enhanced processing pipeline for better accuracy"""
     if index is None:
         return ["Pinecone index not available"] * len(questions)
+    
     request_id = uuid.uuid4().hex[:8]
-    chunks = chunk_text(document_text)
-    embeddings = get_cohere_embeddings(chunks)
-    pinecone_vectors = [
-        (f"{request_id}-{i}", vec, {"text": chunks[i]})
-        for i, vec in enumerate(embeddings)
-    ]
-    index.upsert(vectors=pinecone_vectors, namespace=request_id)
+    
+    # Step 1: Enhanced chunking with fact extraction
+    enhanced_chunks = enhanced_semantic_chunking(document_text)
+    
+    # Step 2: Initialize precision retriever
+    retriever = PrecisionRetriever(co)
+    retriever.add_chunks(enhanced_chunks)
+    
+    # Step 3: Process each question
     answers = []
-    for question in questions:
-        try:
-            query_embedding = get_cohere_embeddings([question])[0]
-            results = index.query(
-                vector=query_embedding,
-                top_k=25,
-                include_metadata=True,
-                namespace=request_id
-            )
-            context_chunks = [match['metadata']['text'] for match in results['matches']]
-            answer = ask_openai(question, context_chunks)
-            answers.append(answer if answer else "Unable to generate answer")
-        except Exception as e:
-            answers.append(f"Error processing question: {str(e)}")
+    
     try:
-        index.delete(delete_all=True, namespace=request_id)
-    except:
-        pass
+        # Store in Pinecone for backup retrieval if needed
+        embeddings = [chunk['embedding'] for chunk in enhanced_chunks]
+        pinecone_vectors = [
+            (f"{request_id}-{i}", embedding, {"text": chunk['text']})
+            for i, (chunk, embedding) in enumerate(zip(enhanced_chunks, embeddings))
+        ]
+        index.upsert(vectors=pinecone_vectors, namespace=request_id)
+        
+        for question in questions:
+            try:
+                # Step 4: Enhanced retrieval
+                retrieved_chunks = retriever.retrieve_for_question(question, top_k=25)
+                
+                # Step 5: Generate precise answer
+                answer = generate_precise_answer(question, retrieved_chunks, openai_client)
+                answers.append(answer if answer else "Unable to generate answer")
+                
+            except Exception as e:
+                answers.append(f"Error processing question: {str(e)}")
+        
+    finally:
+        # Cleanup
+        try:
+            index.delete(delete_all=True, namespace=request_id)
+        except:
+            pass
+    
     return answers
 
 # === API Routes ===
