@@ -16,7 +16,7 @@ from pdf2image import convert_from_bytes
 from dotenv import load_dotenv
 import cohere
 from openai import OpenAI
-import re
+
 # Load environment variables
 load_dotenv()
 
@@ -73,30 +73,13 @@ def extract_text_from_pdf_url(pdf_url: str) -> str:
     return " ".join(pytesseract.image_to_string(img) for img in images)
 
 # === Text Splitting ===
-def semantic_chunk_text(text: str) -> List[str]:
-    # Normalize spaces
-    text = re.sub(r'\s+', ' ', text)
-    
-    # Step 1: Split on strong semantic boundaries (headings, clause labels, numbered sections)
-    semantic_sections = re.split(
-        r'(?i)(?=\b(section|clause|article)\s+\d+[:.)])', 
-        text
-    )
-    
-    # Step 2: Further split sections if too long, but preserve sentence boundaries
+def chunk_text(text: str) -> List[str]:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
-        chunk_overlap=100,
-        separators=["\n\n", "\n", ". ", "; "]
+        chunk_overlap=150,
+        separators=["\n\n", "\n", ".", " ", ""]
     )
-    
-    final_chunks = []
-    for section in semantic_sections:
-        if len(section.strip()) < 50:
-            continue
-        final_chunks.extend(splitter.split_text(section.strip()))
-    
-    return final_chunks
+    return splitter.split_text(text)
 
 # === Embeddings ===
 def preprocess(text):
@@ -123,6 +106,7 @@ def ask_openai(question: str, context_chunks: List[str]) -> str:
         response = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
+            temperature=0.2
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
@@ -151,7 +135,7 @@ def process_questions_with_model(document_text: str, questions: List[str]) -> Li
     if index is None:
         return ["Pinecone index not available"] * len(questions)
     request_id = uuid.uuid4().hex[:8]
-    chunks = semantic_chunk_text(document_text)
+    chunks = chunk_text(document_text)
     embeddings = get_cohere_embeddings(chunks)
     pinecone_vectors = [
         (f"{request_id}-{i}", vec, {"text": chunks[i]})
