@@ -121,7 +121,7 @@ def ask_openai(question: str, context_chunks: List[str]) -> str:
             {"role": "user", "content": f"The user asked a question based on a document. Use only the context below to answer.\n\nContext:\n{context}\n\nQuestion:\n{question}"}
         ]
         response = openai_client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-5-nano",
             messages=messages,
         )
         return response.choices[0].message.content.strip()
