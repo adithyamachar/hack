@@ -10,9 +10,11 @@ python-multipart==0.0.6
 pydantic
 langchain
 pytesseract
-openai
+openai>=1.40.0
 pdf2image
 python-dotenv
 Pillow
 typing-extensions==4.8.0
 spacy==3.7.2
+
+
